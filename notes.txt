@@ -1,0 +1,39 @@
+- Axis label in figure 2 is the best (titles)
+- x-axis, y-axis ticks are best in figure 1 
+- remove the grid lines in figure 3
+- put legend into the figure 
+- Pop in it figure A (legend) 
+- Figure 1 put legend in A 
+- Add figure for delta H 
+- Mention the virulence evolution was run over multiple simulations
+- 
+
+- Maybe ask about internships/research at university? 
+- Prioritize going over figures first, then supplementary materials 
+- Do the license and then do the README 
+- Look at Ashby's README then copy structure of those 
+
+- looking at 1st year core stuff
+- Proofs
+- HS Math to undergrad do Proofs
+- How do i prove this is real
+- reading around some of that stuff
+- groups, sets, etc. 
+- ask about 1st honours, 2:1, etc.
+- 60/70%
+- Upper 2nd class is good
+- Where am I relative to my peers
+- Algebra, Analysis
+- Proof by geometry
+- applied 
+- Use the resources available to you
+- Most professors are happy to help
+- Use those tutorials (go to them with questions)
+- Come with questions, unique 1:1, 2:1 time with professor
+
+- Bit prepared to go in and be suprised 
+- Not much grading on a curve
+- Societies and sports fair
+- lifelong friends
+- embracing the opportunities
+- 
