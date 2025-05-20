@@ -1,7 +1,8 @@
-// ev_sweep.cpp
-// g++-14 -std=c++14 -O2 -fopenmp -o ev_sweep ev_sweep.cpp
-// ./ev_sweep
-
+/*
+sensitivity_analysis.cpp 
+Analyzes parameter sensitivity for main ecological parameters. Records evolved virulence levels
+Compile: g++-14 -std=c++14 -O2 -fopenmp -o sensitivity sensitivity_analysis.cpp
+*/
 
 #include <iostream>
 #include <fstream>
@@ -14,7 +15,7 @@
 #include <sstream>
 #include <omp.h>
 
-// ---------------- GLOBAL SETTINGS ----------------
+// Default Parameters
 static const int    NUM_TRAITS        = 21;
 static const int    EVOL_STEPS        = 2000;
 static const double TSPAN             = 400.0;
@@ -33,14 +34,12 @@ static const double EPS               = 1e-4;
 static const double TINY              = 1e-30;
 static const int    MAX_ECO_STEPS     = 2000000;
 
-// Sweep settings
-static const int    RES          = 5;      // number of points per parameter
-static const int    FIXED_N      = 3;      // n = 3
-static const double FIXED_THETA0 = 5.0;    // theta0 = 5
+static const int    RES          = 5;
+static const int    FIXED_N      = 3;
+static const double FIXED_THETA0 = 5.0;
 
 using state_type = std::vector<double>;
 
-// ----------------- Utility functions -----------------
 int blockSize(int N) {
     return N*N + N;
 }
@@ -66,35 +65,42 @@ std::vector<std::vector<double>> create_infection_matrix(int N, double s){
 }
 
 void applyRelativeExtinction(state_type &y, int N, int numTraits, double relThresh){
-    double sumS = 0.0;
-    for(int i=0; i<N; i++) sumS += y[i];
-    if(sumS > 0.0){
-        double cS = relThresh * sumS;
-        for(int i=0; i<N; i++) if(y[i] < cS) y[i] = 0.0;
+    double sumS=0.0;
+    for(int i=0; i<N; i++){
+        sumS += y[i];
     }
-    int bs = blockSize(N);
+    if(sumS>0.0){
+        double cS = relThresh*sumS;
+        for(int i=0; i<N; i++){
+            if(y[i] < cS) y[i]=0.0;
+        }
+    }
+    int bs=blockSize(N);
     for(int tr=0; tr<numTraits; tr++){
         int off = N + tr*bs;
-        // infected
-        double sumI = 0.0;
-        for(int idx=0; idx<N*N; idx++) sumI += y[off+idx];
-        if(sumI > 0.0){
-            double cI = relThresh * sumI;
-            for(int idx=0; idx<N*N; idx++)
-                if(y[off+idx] < cI) y[off+idx] = 0.0;
+        double sumI=0.0;
+        for(int idx=0; idx<N*N; idx++){
+            sumI += y[off+idx];
         }
-        // free parasite
-        double sumP = 0.0;
-        for(int j=0; j<N; j++) sumP += y[off + N*N + j];
-        if(sumP > 0.0){
-            double cP = relThresh * sumP;
-            for(int j=0; j<N; j++)
-                if(y[off + N*N + j] < cP) y[off + N*N + j] = 0.0;
+        if(sumI>0.0){
+            double cI=relThresh*sumI;
+            for(int idx=0; idx<N*N; idx++){
+                if(y[off+idx]<cI) y[off+idx]=0.0;
+            }
+        }
+        double sumP=0.0;
+        for(int j=0;j<N;j++){
+            sumP += y[off + N*N + j];
+        }
+        if(sumP>0.0){
+            double cP = relThresh*sumP;
+            for(int j=0;j<N;j++){
+                if(y[off + N*N + j]<cP) y[off + N*N + j]=0.0;
+            }
         }
     }
 }
 
-// ----------------- Dynamics functor -----------------
 struct alleleDynamics {
     int N, numTraits;
     const std::vector<double>& alphaVec;
@@ -144,13 +150,12 @@ struct alleleDynamics {
             }
         }
 
-        double totalPop = std::accumulate(S.begin(), S.end(), 0.0);   // S
-
-        // add all infected I(i,j,k)
+        // sums over all infected and susceptible populations
+        double totalPop = std::accumulate(S.begin(), S.end(), 0.0);
         for(int tr = 0; tr < numTraits; ++tr){
-            int off = N + tr*blockSize(N);          // start of trait‑block
+            int off = N + tr*blockSize(N);
             for(int idx = 0; idx < N*N; ++idx)
-                totalPop += y[off + idx];           // I(i,j,k)
+                totalPop += y[off + idx];
         }
         double birthFactor = std::max(0.0, 1.0 - q*totalPop);
 
@@ -162,7 +167,6 @@ struct alleleDynamics {
     }
 };
 
-// ---- RKCK step, all temporaries local ----
 static void rkck(alleleDynamics &dyn,
                  const state_type &y,
                  const state_type &dydt_in,
@@ -224,7 +228,6 @@ static void rkck(alleleDynamics &dyn,
     }
 }
 
-// ---- Adaptive RKQS step, all temporaries local ----
 static void rkqs(alleleDynamics &dyn,
                  state_type &y,
                  state_type &dydt,
@@ -267,7 +270,6 @@ static void rkqs(alleleDynamics &dyn,
     }
 }
 
-// ---------------- Integrator wrapper ----------------
 static void integrate_ecology(alleleDynamics &dyn,
                               state_type &y,
                               double TSPAN,
@@ -291,7 +293,9 @@ static void integrate_ecology(alleleDynamics &dyn,
     dt_local = h;
 }
 
-// ---------------- Single-simulation driver ----------------
+// ------------------------------------------------------------------
+// This function runs a single simulation for parameter set
+// ------------------------------------------------------------------
 double runSimulation(int N, double s, double theta0,
                      double b_param, double beta0_param,
                      double gamma_param, double delta_param,
@@ -415,14 +419,16 @@ double runSimulation(int N, double s, double theta0,
     return (sumI>0.0 ? sumAlphaI/sumI : 0.0);
 }
 
-// ---------------- MAIN: parameter sweep ----------------
 int main(){
+
+    // logspace for parameter sweep
     auto B     = logspace(DEFAULT_B/2.0,      DEFAULT_B*2.0,      RES);
     auto BETA0 = logspace(DEFAULT_BETA0/10.0, DEFAULT_BETA0*10.0, RES);
     auto GAMMA = logspace(DEFAULT_GAMMA/2.0,  DEFAULT_GAMMA*2.0,  RES);
     auto DELTA = logspace(DEFAULT_DELTA/10.0, DEFAULT_DELTA*10.0, RES);
 
-    std::ofstream sweepOut("param_sweep_parallel_2.csv");
+    // open csv
+    std::ofstream sweepOut("sensitivity_analysis.csv");
     sweepOut<<"b,beta0,gamma,delta,mean_alpha_s1,mean_alpha_s0\n";
 
     struct P { double b,b0,g,d; };

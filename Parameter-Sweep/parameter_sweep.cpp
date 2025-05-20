@@ -1,4 +1,8 @@
-// g++-14 -std=c++14 -O2 -I /opt/homebrew/include -fopenmp -o ev_sweep ev_sweep.cpp
+/*
+parameter_sweep.cpp
+Records mean virulence level across varying specificity, n, and theta tilde values 
+Compile: g++-14 -std=c++14 -O2 -I /opt/homebrew/include -fopenmp -o parameter_sweep parameter_sweep.cpp
+*/
 
 #include <iostream>
 #include <fstream>
@@ -11,7 +15,7 @@
 #include <sstream>
 #include <omp.h>
 
-// ---------------- GLOBAL SETTINGS (same as before) ----------------
+// Default Parameters
 static const int    NUM_TRAITS = 21;         
 static const int    EVOL_STEPS = 2000;       
 static const double TSPAN     = 400.0;       
@@ -31,12 +35,6 @@ static const double TINY = 1e-30;
 static const int    MAX_ECO_STEPS = 2000000; 
 
 using state_type = std::vector<double>;
-
-// -------------------------------------------------------------------
-// Below this point is the same code you have for your model/solver,
-// but wrapped in a function runSimulation(...) that returns the final 
-// mean virulence. Then in main() we do a parallel sweep. 
-// -------------------------------------------------------------------
 
 int blockSize(int N) {
     return N*N + N;
@@ -90,12 +88,10 @@ void applyRelativeExtinction(state_type &y, int N, int numTraits, double relThre
     }
 }
 
-// ---------- ODE system ----------
 struct alleleDynamics {
-    int N;
-    int numTraits;
+    int N, numTraits;
     const std::vector<double>& alphaVec;
-    double s,b,gamma_,theta0,delta,d,q,beta;
+    double s, b, gamma_, theta0, delta, d, q, beta;
 
     alleleDynamics(int N_, int nt_, const std::vector<double> &aV,
                    double s_, double b_, double g_, double t_,
@@ -107,67 +103,57 @@ struct alleleDynamics {
 
     void operator()(const state_type &y, state_type &dydt) const {
         dydt.assign(y.size(), 0.0);
-
-        // Susceptibles
         std::vector<double> S(N);
-        for(int i=0;i<N;i++){
-            S[i] = (y[i]<0.0? 1e-6 : y[i]);
-        }
-
+        for(int i=0;i<N;i++) S[i] = (y[i]<0.0? 1e-6 : y[i]);
         auto Q = create_infection_matrix(N,s);
         std::vector<double> infLoss(N,0.0), recGain(N,0.0);
 
-        // loop over traits
         for(int tr=0; tr<numTraits; tr++){
             int off = N + tr*blockSize(N);
-            double theta_k = theta0*sqrt(alphaVec[tr]);
-
-            // infected compartments
+            double theta_k = theta0 * std::sqrt(alphaVec[tr]);
+            // infected
             for(int i=0;i<N;i++){
                 for(int j=0;j<N;j++){
-                    int idxI=off + i*N + j;
-                    double I_ij=y[idxI];
-                    int idxP=off + N*N + j;
-                    double P_j=y[idxP];
-
+                    int idxI = off + i*N + j;
+                    double I_ij = y[idxI];
+                    int idxP = off + N*N + j;
+                    double P_j  = y[idxP];
                     double dI = beta*Q[i][j]*P_j*S[i]
-                                - (d + gamma_ + alphaVec[tr])*I_ij;
-                    dydt[idxI]= dI;
-                    infLoss[i]+= beta*Q[i][j]*P_j*S[i];
-                    recGain[i]+= gamma_*I_ij;
+                              - (d + gamma_ + alphaVec[tr])*I_ij;
+                    dydt[idxI] = dI;
+                    infLoss[i] += beta*Q[i][j]*P_j*S[i];
+                    recGain[i] += gamma_*I_ij;
                 }
             }
-            // free parasite
+            // free parasites
             for(int j=0;j<N;j++){
-                int idxP=off + N*N + j;
-                double P_j=y[idxP];
-                double sumI=0.0;
-                for(int i=0;i<N;i++){
-                    sumI += y[off + i*N + j];
-                }
-                double inf_loss=0.0;
-                for(int i=0;i<N;i++){
-                    inf_loss += beta*Q[i][j]*S[i];
-                }
+                int idxP = off + N*N + j;
+                double P_j = y[idxP];
+                double sumI = 0.0;
+                for(int i=0;i<N;i++) sumI += y[off + i*N + j];
+                double inf_loss = 0.0;
+                for(int i=0;i<N;i++) inf_loss += beta*Q[i][j]*S[i];
                 dydt[idxP] = theta_k*sumI - delta*P_j - inf_loss*P_j;
             }
         }
 
-        // update S
-        double totalPop=0.0;
-        for(int i=0;i<N;i++){
-            totalPop += S[i];
+        // sums over all infected and susceptible populations
+        double totalPop = std::accumulate(S.begin(), S.end(), 0.0);
+        for(int tr = 0; tr < numTraits; ++tr){
+            int off = N + tr*blockSize(N);
+            for(int idx = 0; idx < N*N; ++idx)
+                totalPop += y[off + idx];
         }
-        double birthFactor=std::max(0.0,1.0 - q*totalPop);
+        double birthFactor = std::max(0.0, 1.0 - q*totalPop);
+
         for(int i=0;i<N;i++){
-            double dS = b*S[i]*birthFactor - d*S[i] 
-                        - infLoss[i] + recGain[i];
-            dydt[i]= dS;
+            double dS = b*S[i]*birthFactor - d*S[i]
+                      - infLoss[i] + recGain[i];
+            dydt[i] = dS;
         }
     }
 };
 
-// ---- RKCK step
 static void rkck(alleleDynamics &dyn,
                  const state_type &y,
                  const state_type &dydt_in,
@@ -175,73 +161,60 @@ static void rkck(alleleDynamics &dyn,
                  state_type &yout,
                  state_type &yerr)
 {
-    static double b21=0.2,
+    static const double b21=0.2,
                   b31=3.0/40.0,  b32=9.0/40.0,
                   b41=0.3,       b42=-0.9,      b43=1.2,
                   b51=-11.0/54.0,b52=2.5,       b53=-70.0/27.0,b54=35.0/27.0,
                   b61=1631.0/55296.0,b62=175.0/512.0,b63=575.0/13824.0,
                   b64=44275.0/110592.0,b65=253.0/4096.0,
                   c1=37.0/378.0,c3=250.0/621.0,c4=125.0/594.0,c6=512.0/1771.0,
-                  dc5=-277.0/14336.0;
+                  dc5=-277.0/14336.0,
+                  dc1=c1-2825.0/27648.0,
+                  dc3=c3-18575.0/48384.0,
+                  dc4=c4-13525.0/55296.0,
+                  dc6=c6-0.25;
 
-    double dc1=c1-2825.0/27648.0,
-           dc3=c3-18575.0/48384.0,
-           dc4=c4-13525.0/55296.0,
-           dc6=c6-0.25;
+    int n = (int)y.size();
+    yout.assign(n, 0.0);
+    yerr.assign(n, 0.0);
 
-    int n=(int)y.size();
-    yout.resize(n);
-    yerr.resize(n);
+    state_type yt(n), k2(n), k3(n), k4(n), k5(n), k6(n);
 
-    static thread_local state_type yt,k2,k3,k4,k5,k6;
-    yt.resize(n); k2.resize(n); k3.resize(n);
-    k4.resize(n); k5.resize(n); k6.resize(n);
-
-    // k1 = dydt_in
     // k2
-    for(int i=0;i<n;i++){
-        yt[i] = y[i] + b21*h*dydt_in[i];
-    }
+    for(int i=0;i<n;i++) yt[i] = y[i] + b21*h*dydt_in[i];
     dyn(yt,k2);
 
     // k3
-    for(int i=0;i<n;i++){
+    for(int i=0;i<n;i++)
         yt[i] = y[i] + h*(b31*dydt_in[i] + b32*k2[i]);
-    }
     dyn(yt,k3);
 
     // k4
-    for(int i=0;i<n;i++){
+    for(int i=0;i<n;i++)
         yt[i] = y[i] + h*(b41*dydt_in[i] + b42*k2[i] + b43*k3[i]);
-    }
     dyn(yt,k4);
 
     // k5
-    for(int i=0;i<n;i++){
-        yt[i] = y[i] + h*(b51*dydt_in[i] + b52*k2[i] 
+    for(int i=0;i<n;i++)
+        yt[i] = y[i] + h*(b51*dydt_in[i] + b52*k2[i]
                           + b53*k3[i] + b54*k4[i]);
-    }
     dyn(yt,k5);
 
     // k6
-    for(int i=0;i<n;i++){
+    for(int i=0;i<n;i++)
         yt[i] = y[i] + h*(b61*dydt_in[i] + b62*k2[i]
                           + b63*k3[i] + b64*k4[i] + b65*k5[i]);
-    }
     dyn(yt,k6);
 
     for(int i=0;i<n;i++){
-        double ytemp = y[i] + h*( c1*dydt_in[i] 
-                                 + c3*k3[i] + c4*k4[i] + c6*k6[i] );
-        double yerr_ = h*( dc1*dydt_in[i] 
-                           + dc3*k3[i] + dc4*k4[i]
-                           + dc5*k5[i] + dc6*k6[i] );
-        yout[i]=ytemp;
-        yerr[i]=yerr_;
+        yout[i] = y[i] + h*(c1*dydt_in[i]
+                          + c3*k3[i] + c4*k4[i] + c6*k6[i]);
+        yerr[i] = h*(dc1*dydt_in[i]
+                   + dc3*k3[i] + dc4*k4[i]
+                   + dc5*k5[i] + dc6*k6[i]);
     }
 }
 
-// ---- Adaptive step
 static void rkqs(alleleDynamics &dyn,
                  state_type &y,
                  state_type &dydt,
@@ -249,71 +222,62 @@ static void rkqs(alleleDynamics &dyn,
                  double &h,
                  double &hnext)
 {
-    static thread_local state_type ytemp,yerr;
-    ytemp.resize(y.size());
-    yerr.resize(y.size());
+    int n = (int)y.size();
+    state_type ytemp(n), yerr(n);
 
-    for(;;){
+    while(true){
         rkck(dyn,y,dydt,h,ytemp,yerr);
-        double errmax=0.0;
-        for(size_t i=0;i<y.size();i++){
-            double scale=fabs(y[i]) + fabs(h*dydt[i]) + TINY;
-            double localErr=fabs(yerr[i]/scale);
-            if(localErr>errmax) errmax=localErr;
+        double errmax = 0.0;
+        for(int i=0;i<n;i++){
+            double scale = std::fabs(y[i]) + std::fabs(h*dydt[i]) + TINY;
+            double localErr = std::fabs(yerr[i]/scale);
+            if(localErr > errmax) errmax = localErr;
         }
-        errmax/=EPS;
+        errmax /= EPS;
 
-        if(errmax>1.0){
-            double htemp=0.9*h*pow(errmax,-0.25);
-            if(htemp<0.1*h) htemp=0.1*h;
-            h=htemp;
+        if(errmax > 1.0){
+            double htemp = 0.9*h*std::pow(errmax,-0.25);
+            h = std::max(htemp, 0.1*h);
             continue;
         }
         // negativity check
-        bool belowMinusTen=false;
-        for(double val: ytemp){
-            if(val<-10.0){ belowMinusTen=true; break;}
+        for(double v : ytemp){
+            if(v < -10.0){
+                std::cerr<<"[Warn] compartment < -10 at t="<<t+h<<"\n";
+                break;
+            }
         }
-        if(belowMinusTen){
-            std::cerr<<"[Warn] Some compartment < -10 @ t="<<t+h<<"\n";
-        }
-        t+=h; 
-        y=ytemp;
-        if(errmax>1.89e-4){
-            hnext=0.9*h*pow(errmax,-0.2);
-        }else{
-            hnext=5.0*h;
-        }
+        t += h;
+        y = ytemp;
+        if(errmax > 1.89e-4)
+            hnext = 0.9*h*std::pow(errmax,-0.2);
+        else
+            hnext = 5.0*h;
         break;
     }
 }
 
-// ---- Integration
 static void integrate_ecology(alleleDynamics &dyn,
                               state_type &y,
                               double TSPAN,
                               double &dt_local)
 {
-    double t=0.0;
-    double h=dt_local, hnext=dt_local;
+    double t = 0.0;
+    double h = dt_local, hnext = dt_local;
+    state_type dydt(y.size());
 
-    static thread_local state_type dydt;
-    dydt.resize(y.size());
-
-    int stepCount=0;
-    while(t<TSPAN){
+    int stepCount = 0;
+    while(t < TSPAN){
         dyn(y,dydt);
-        if(t+h>TSPAN) h=TSPAN - t;
+        if(t + h > TSPAN) h = TSPAN - t;
         rkqs(dyn,y,dydt,t,h,hnext);
-        stepCount++;
-        if(stepCount>MAX_ECO_STEPS){
-            std::cerr<<"[Warn] max steps reached.\n";
+        if(++stepCount > MAX_ECO_STEPS){
+            std::cerr<<"[Warn] max eco steps reached\n";
             break;
         }
-        h=hnext;
-        if(t>=TSPAN) break;
+        h = hnext;
     }
-    dt_local=h;
+    dt_local = h;
 }
 
 // ------------------------------------------------------------------
@@ -322,14 +286,13 @@ static void integrate_ecology(alleleDynamics &dyn,
 // ------------------------------------------------------------------
 double runSimulation(int N, double s, double theta0, bool verbose=false)
 {
-    // 1) alpha array
+    // alpha array
     std::vector<double> alphaVec(NUM_TRAITS);
     for(int i=0; i<NUM_TRAITS; i++){
         alphaVec[i] = ALPHA_LOW 
             + i*(ALPHA_HIGH - ALPHA_LOW)/(NUM_TRAITS-1);
     }
 
-    // 2) random init (ONLY TRAIT 0)
     std::mt19937 rng(12345);
     std::uniform_real_distribution<double> dist(0.0,1.0);
 
@@ -337,7 +300,6 @@ double runSimulation(int N, double s, double theta0, bool verbose=false)
     int totalSize = N + NUM_TRAITS*bs;
     state_type y(totalSize,0.0);
 
-    // Susceptible hosts (all N get random initial)
     for(int i=0; i<N; i++){
         y[i] = dist(rng);
     }
@@ -345,35 +307,32 @@ double runSimulation(int N, double s, double theta0, bool verbose=false)
     // Only trait 0 infected compartments get random init
     // other traits remain zero
     {
-        int off0 = N + 0*bs; // offset for trait 0
-        // Infecteds I_{i,j} (n*n of them)
+        int off0 = N + 0*bs;
         for(int i=0; i<N; i++){
             for(int j=0; j<N; j++){
                 y[off0 + i*N + j] = dist(rng);
             }
         }
-        // Free parasites P_j (n of them)
         for(int j=0; j<N; j++){
             y[off0 + N*N + j] = dist(rng);
         }
     }
 
-    // 3) ecological params
-    double beta   = DEFAULT_BETA0 * N;  // as you indicated
+    // ecological params
+    double beta   = DEFAULT_BETA0 * N;
     double b      = DEFAULT_B;     
     double gamma_ = DEFAULT_GAMMA; 
     double delta  = DEFAULT_DELTA;
     double dd     = DEFAULT_D;
     double q      = DEFAULT_Q;
 
-    // We'll store parasite compartments from the last 20 steps:
     const int LATE_STEPS = 20;
-    // partial sums of infected compartments for each trait
     std::vector<double> accumTraitI(NUM_TRAITS, 0.0);
     int stepsCounted = 0;
 
-    // 4) evolution
+    // evolution
     for(int step=0; step<EVOL_STEPS; step++){
+
         // check parasite extinction
         double totPara=0.0;
         for(double val: y){
@@ -383,7 +342,6 @@ double runSimulation(int N, double s, double theta0, bool verbose=false)
             if(verbose) {
                 std::cout<<"Parasites extinct at step "<<step<<"\n";
             }
-            // We break out since no parasites remain
             break;
         }
 
@@ -455,16 +413,11 @@ double runSimulation(int N, double s, double theta0, bool verbose=false)
         }
         applyRelativeExtinction(y,N,NUM_TRAITS,REL_EXT_THRESHOLD);
 
-        // ----------------------------
-        // if we are within the last 20 steps, accumulate trait I
-        // so we can average afterwards
-        // ----------------------------
         if(step >= EVOL_STEPS - LATE_STEPS){
             // sum up infected for each trait
             for(int tr=0; tr<NUM_TRAITS; tr++){
                 double traitI=0.0;
                 int off = N + tr*bs;
-                // infected are off..off+(n*n)-1
                 for(int idx=0; idx<N*N; idx++){
                     traitI += y[off+idx];
                 }
@@ -474,11 +427,10 @@ double runSimulation(int N, double s, double theta0, bool verbose=false)
         }
     } // end evolutionary loop
 
-    // 5) Compute average infected across last 20 steps => mean alpha
     if(stepsCounted == 0) {
-        // Means we never got that far, or everything went extinct
         return 0.0;
     }
+
     // Average infected for each trait
     double sumI=0.0, sumAlphaI=0.0;
     for(int tr=0; tr<NUM_TRAITS; tr++){
@@ -491,9 +443,8 @@ double runSimulation(int N, double s, double theta0, bool verbose=false)
     return meanAlpha;
 }
 
-// ---------------- MAIN: parallel parameter sweep ----------------
 int main(){
-    // Example sets:
+    // parameter sweep sets
     std::vector<int>    N_vals = {2, 3, 4, 5};
     std::vector<double> theta_vals = {4.0,5.0,6.0};
 
@@ -504,12 +455,9 @@ int main(){
     }
 
     // open CSV
-    std::ofstream sweepOut("param_sweep_parallel.csv");
+    std::ofstream sweepOut("parameter_sweep.csv");
     sweepOut << "N,s,theta,mean_virulence\n";
 
-    // We'll do an integer index for the triple loop
-    // to use #pragma omp parallel for. We store all combinations
-    // in a vector first.
     struct ParamSet {int N; double s; double theta;};
     std::vector<ParamSet> combos;
     for(int N: N_vals){
@@ -528,8 +476,7 @@ int main(){
         double th= combos[i].theta;
         double res = runSimulation(N, s, th, false);
 
-        // Write result + print to console:
-        // must do in a critical section to avoid mixing lines
+        // Write result + print to console
         #pragma omp critical
         {
             sweepOut << N << "," << s << "," << th 

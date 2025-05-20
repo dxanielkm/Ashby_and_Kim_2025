@@ -1,7 +1,8 @@
-// ev_sweep.cpp
-// g++-14 -std=c++14 -O2 -fopenmp -o mean_host mean_host.cpp
-// ./ev_sweep
-
+/*
+mean_host.cpp 
+Simulates mean host density in host-parasite model for varying specificity levels 
+Compile: g++-14 -std=c++14 -O2 -fopenmp -o mean_host mean_host.cpp
+*/
 
 #include <iostream>
 #include <fstream>
@@ -16,7 +17,7 @@
 #include <tuple>
 #include <iomanip>
 
-// ---------------- GLOBAL SETTINGS ----------------
+// Default Parameters
 static const int    NUM_TRAITS        = 21;
 static const int    EVOL_STEPS        = 2000;
 static const double TSPAN             = 400.0;
@@ -35,14 +36,12 @@ static const double EPS               = 1e-4;
 static const double TINY              = 1e-30;
 static const int    MAX_ECO_STEPS     = 2000000;
 
-// Sweep settings
-static const int    RES          = 5;      // number of points per parameter
-static const int    FIXED_N      = 3;      // n = 3
-static const double FIXED_THETA0 = 5.0;    // theta0 = 5
+static const int    RES          = 5;
+static const int    FIXED_N      = 3;
+static const double FIXED_THETA0 = 5.0;
 
 using state_type = std::vector<double>;
 
-// ----------------- Utility functions -----------------
 int blockSize(int N) {
     return N*N + N;
 }
@@ -58,7 +57,6 @@ std::vector<std::vector<double>> create_infection_matrix(int N, double s){
     return Q;
 }
 
-// ----------------- Dynamics functor -----------------
 struct alleleDynamics {
     int N, numTraits;
     const std::vector<double>& alphaVec;
@@ -108,13 +106,12 @@ struct alleleDynamics {
             }
         }
 
-        double totalPop = std::accumulate(S.begin(), S.end(), 0.0);   // S
-
-        // add all infected I(i,j,k)
+        // sums over all infected and susceptible populations
+        double totalPop = std::accumulate(S.begin(), S.end(), 0.0);
         for(int tr = 0; tr < numTraits; ++tr){
-            int off = N + tr*blockSize(N);          // start of trait‑block
+            int off = N + tr*blockSize(N);
             for(int idx = 0; idx < N*N; ++idx)
-                totalPop += y[off + idx];           // I(i,j,k)
+                totalPop += y[off + idx];
         }
         double birthFactor = std::max(0.0, 1.0 - q*totalPop);
 
@@ -126,7 +123,6 @@ struct alleleDynamics {
     }
 };
 
-// ---- RKCK step, all temporaries local ----
 static void rkck(alleleDynamics &dyn,
                  const state_type &y,
                  const state_type &dydt_in,
@@ -188,7 +184,6 @@ static void rkck(alleleDynamics &dyn,
     }
 }
 
-// ---- Adaptive RKQS step, all temporaries local ----
 static void rkqs(alleleDynamics &dyn,
                  state_type &y,
                  state_type &dydt,
@@ -231,7 +226,6 @@ static void rkqs(alleleDynamics &dyn,
     }
 }
 
-// ---------------- Integrator wrapper ----------------
 static void integrate_ecology(alleleDynamics &dyn,
                               state_type &y,
                               double TSPAN,
@@ -255,27 +249,25 @@ static void integrate_ecology(alleleDynamics &dyn,
     dt_local = h;
 }
 
-// ---------- one ecological trajectory, returns <mean,max,min> -------------
+// one ecological trajectory, returns <mean,max,min>
 static std::tuple<double,double,double>
 simulateHostAvailability(int N, double s,
-                         double duration   = 20000.0,  // MaxTime
-                         double sample_dt  = 1.0)      // 1 time‑unit steps
+                         double duration   = 20000.0, 
+                         double sample_dt  = 1.0) 
 {
-    /* parameters exactly as in the MATLAB script */
-    const double b      = DEFAULT_B;       // 3
-    const double d      = DEFAULT_D;       // 1
-    const double q      = DEFAULT_Q;       // 1
-    const double beta0  = DEFAULT_BETA0;   // 1
-    const double gamma  = DEFAULT_GAMMA;   // 1
-    const double delta  = DEFAULT_DELTA;   // 0.1
-    const double theta0 = FIXED_THETA0;    // 5
+    // ecological parameters
+    const double b      = DEFAULT_B;
+    const double d      = DEFAULT_D;
+    const double q      = DEFAULT_Q;
+    const double beta0  = DEFAULT_BETA0;
+    const double gamma  = DEFAULT_GAMMA;
+    const double delta  = DEFAULT_DELTA;
+    const double theta0 = FIXED_THETA0;
 
-    // ---- alpha vector (unchanged from the solver) -------------------------
     std::vector<double> alphaVec(NUM_TRAITS);
     for (int i = 0; i < NUM_TRAITS; ++i)
         alphaVec[i] = ALPHA_LOW + i*(ALPHA_HIGH - ALPHA_LOW)/(NUM_TRAITS - 1);
 
-    // ---- initial conditions: same spirit as MATLAB (rand()/10) ------------
     std::mt19937 rng(12345 + N * 7919 + int(s * 1000));
     std::uniform_real_distribution<double> ur(0.0, 1.0);
 
@@ -283,19 +275,18 @@ simulateHostAvailability(int N, double s,
     const int SIZE = N + NUM_TRAITS * bs;
     state_type y(SIZE, 0.0);
 
-    for (int i = 0; i < N; ++i) y[i] = ur(rng) / 10.0;          // S
-    int off0 = N;                                                // trait 0
+    for (int i = 0; i < N; ++i) y[i] = ur(rng) / 10.0;
+    int off0 = N;
     for (int i = 0; i < N; ++i)
         for (int j = 0; j < N; ++j)
-            y[off0 + i*N + j] = ur(rng) / 10.0;                  // I
+            y[off0 + i*N + j] = ur(rng) / 10.0;
     for (int j = 0; j < N; ++j)
-        y[off0 + N*N + j] = ur(rng) / 10.0;                      // P
+        y[off0 + N*N + j] = ur(rng) / 10.0;
 
-    // ---- simulation loop ---------------------------------------------------
     std::vector<double> series;
     auto   Q   = create_infection_matrix(N, s);
     double t   = 0.0;
-    double beta = beta0 * N;                                     // scaling
+    double beta = beta0 * N;
 
     while (t < duration) {
         alleleDynamics dyn(N, NUM_TRAITS, alphaVec,
@@ -306,13 +297,11 @@ simulateHostAvailability(int N, double s,
         integrate_ecology(dyn, y, sample_dt, dt_local);
         t += sample_dt;
 
-        // host availability for host 1: Σ_i S_i * Q_{i1}
         double H1 = 0.0;
         for (int i = 0; i < N; ++i) H1 += y[i] * Q[i][0];
         series.push_back(H1);
     }
 
-    // ---- stats over last 20 % of the trajectory ---------------------------
     std::size_t start = static_cast<std::size_t>(series.size() * 0.8);
     double mean = 0.0, minv = std::numeric_limits<double>::max(),
            maxv = std::numeric_limits<double>::lowest();
@@ -329,16 +318,18 @@ simulateHostAvailability(int N, double s,
 
 int main()
 {
+    // sets to work with 
     const std::vector<int> N_vals = {2, 3, 4, 5};
     const int              S_RES  = 21;
 
-    std::ofstream fout("host_availability.csv");
+    // open csv
+    std::ofstream fout("mean_host.csv");
     fout << "n,s,mean_H,max_H,min_H\n";
     fout << std::setprecision(10);
 
     for (int N : N_vals) {
         for (int i = 0; i < S_RES; ++i) {
-            double s = i / double(S_RES - 1);      // linspace 0‑1
+            double s = i / double(S_RES - 1); // linspace 0‑1
 
             auto [meanH, maxH, minH] = simulateHostAvailability(N, s);
 
