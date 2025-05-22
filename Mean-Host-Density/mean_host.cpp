@@ -1,7 +1,7 @@
 /*
 mean_host.cpp 
 Simulates mean host density in host-parasite model for varying specificity levels 
-Compile: g++-14 -std=c++14 -O2 -fopenmp -o mean_host mean_host.cpp
+Compile: g++-14 -std=c++17 -O2 -fopenmp -o mean_host mean_host.cpp
 */
 
 #include <iostream>
@@ -249,12 +249,9 @@ static void integrate_ecology(alleleDynamics &dyn,
     dt_local = h;
 }
 
-// one ecological trajectory, returns <mean,max,min>
-static std::tuple<double,double,double>
-simulateHostAvailability(int N, double s,
-                         double duration   = 20000.0, 
-                         double sample_dt  = 1.0) 
-{
+static std::tuple<double,double,double,double>
+simulateHostAvailability(int N, double s, double duration = 20000.0, double sample_dt  = 1.0) {
+
     // ecological parameters
     const double b      = DEFAULT_B;
     const double d      = DEFAULT_D;
@@ -284,14 +281,17 @@ simulateHostAvailability(int N, double s,
         y[off0 + N*N + j] = ur(rng) / 10.0;
 
     std::vector<double> series;
-    auto   Q   = create_infection_matrix(N, s);
-    double t   = 0.0;
+    auto Q = create_infection_matrix(N, s);
+    double t = 0.0;
     double beta = beta0 * N;
 
+    double total_infected_sum = 0.0;
+    double total_hosts_sum    = 0.0;
+    int    prevalence_count   = 0;
+    double start_collecting   = duration * 0.8;
+
     while (t < duration) {
-        alleleDynamics dyn(N, NUM_TRAITS, alphaVec,
-                           s, b, gamma, theta0,
-                           delta, d, q, beta);
+        alleleDynamics dyn(N, NUM_TRAITS, alphaVec, s, b, gamma, theta0, delta, d, q, beta);
 
         double dt_local = sample_dt;
         integrate_ecology(dyn, y, sample_dt, dt_local);
@@ -300,6 +300,26 @@ simulateHostAvailability(int N, double s,
         double H1 = 0.0;
         for (int i = 0; i < N; ++i) H1 += y[i] * Q[i][0];
         series.push_back(H1);
+
+        if (t >= start_collecting) {
+            double infected = 0.0;
+            double hosts = 0.0;
+
+            for (int i = 0; i < N; ++i)
+                hosts += y[i];
+
+            for (int tr = 0; tr < NUM_TRAITS; ++tr) {
+                int off = N + tr * blockSize(N);
+                for (int idx = 0; idx < N * N; ++idx)
+                    infected += y[off + idx];
+            }
+
+            hosts += infected;
+
+            total_infected_sum += infected;
+            total_hosts_sum    += hosts;
+            prevalence_count   += 1;
+        }
     }
 
     std::size_t start = static_cast<std::size_t>(series.size() * 0.8);
@@ -313,34 +333,36 @@ simulateHostAvailability(int N, double s,
     }
     mean /= (series.size() - start);
 
-    return {mean, maxv, minv};
+    double mean_dis_prev = (prevalence_count > 0)
+        ? total_infected_sum / total_hosts_sum
+        : 0.0;
+
+    return {mean, maxv, minv, mean_dis_prev};
 }
 
 int main()
 {
-    // sets to work with 
     const std::vector<int> N_vals = {2, 3, 4, 5};
-    const int              S_RES  = 21;
+    const int S_RES = 21;
 
-    // open csv
     std::ofstream fout("mean_host.csv");
-    fout << "n,s,mean_H,max_H,min_H\n";
+    fout << "n,s,mean_H,max_H,min_H,mean_dis_prev\n";
     fout << std::setprecision(10);
 
     for (int N : N_vals) {
         for (int i = 0; i < S_RES; ++i) {
-            double s = i / double(S_RES - 1); // linspace 0‑1
+            double s = i / double(S_RES - 1);
 
-            auto [meanH, maxH, minH] = simulateHostAvailability(N, s);
+            auto [meanH, maxH, minH, meanPrev] = simulateHostAvailability(N, s);
 
             fout << N << ',' << s << ','
-                 << meanH << ',' << maxH << ',' << minH << '\n';
+                 << meanH << ',' << maxH << ',' << minH << ',' << meanPrev << '\n';
 
             std::cout << "n=" << N << "  s=" << s
-                      << "  →  mean=" << meanH << '\n';
+                      << "  →  mean=" << meanH << "  prev=" << meanPrev << '\n';
         }
     }
 
-    std::cout << "\nDone. Data in host_availability.csv\n";
+    std::cout << "\nDone. Data in mean_host.csv\n";
     return 0;
 }
